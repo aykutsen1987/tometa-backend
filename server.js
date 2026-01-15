@@ -7,10 +7,10 @@ const app = express();
 const upload = multer();
 const PORT = process.env.PORT || 3000;
 
-// CloudConvert API Key (Render ENV'den gelir)
+// CloudConvert API Key (Render ENV)
 const CLOUD_KEY = process.env.CLOUDCONVERT_API_KEY;
 
-// Günlük ücretsiz limit (CloudConvert free: 10)
+// Günlük ücretsiz limit (CloudConvert Free = 10)
 let dailyCount = 0;
 
 // 24 saatte bir sıfırla
@@ -34,12 +34,20 @@ app.post("/convert", upload.single("file"), async (req, res) => {
 
   if (!req.file || !req.body.target) {
     return res.status(400).json({
-      error: "file or target missing"
+      status: "error",
+      message: "file or target missing"
     });
   }
 
+  const target = req.body.target.toLowerCase();
+
+  // 🔥 OCR SADECE PDF → DOCX için aktif
+  const isPdfToDocx =
+    target === "docx" &&
+    req.file.originalname.toLowerCase().endsWith(".pdf");
+
   try {
-    // 1️⃣ Job oluştur
+    // 1️⃣ CloudConvert Job oluştur
     const jobRes = await axios.post(
       "https://api.cloudconvert.com/v2/jobs",
       {
@@ -47,11 +55,22 @@ app.post("/convert", upload.single("file"), async (req, res) => {
           "import-file": {
             operation: "import/upload"
           },
+
           "convert-file": {
             operation: "convert",
             input: "import-file",
-            output_format: req.body.target
+            input_format: "pdf",
+            output_format: target,
+
+            // 🔥 PDF → DOCX ise OCR + Office engine
+            ...(isPdfToDocx && {
+              engine: "office",
+              ocr: true,
+              ocr_language: "tur+eng",
+              optimize: true
+            })
           },
+
           "export-file": {
             operation: "export/url",
             input: "convert-file"
@@ -65,22 +84,22 @@ app.post("/convert", upload.single("file"), async (req, res) => {
       }
     );
 
-    // Import task bilgileri
+    // Import task
     const importTask = Object.values(jobRes.data.data.tasks)
       .find(t => t.operation === "import/upload");
 
-    // 2️⃣ Dosyayı CloudConvert upload URL'ye gönder
+    // 2️⃣ Dosyayı upload et
     const form = new FormData();
-    Object.entries(importTask.result.form.parameters).forEach(([k, v]) => {
-      form.append(k, v);
-    });
+    Object.entries(importTask.result.form.parameters)
+      .forEach(([k, v]) => form.append(k, v));
+
     form.append("file", req.file.buffer, req.file.originalname);
 
     await axios.post(importTask.result.form.url, form, {
       headers: form.getHeaders()
     });
 
-    // 3️⃣ Job tamamlanmasını bekle
+    // 3️⃣ Job tamamlanana kadar bekle
     let job;
     while (true) {
       const statusRes = await axios.get(
@@ -93,15 +112,16 @@ app.post("/convert", upload.single("file"), async (req, res) => {
       );
 
       job = statusRes.data.data;
+
       if (job.status === "finished") break;
       if (job.status === "error") {
-        throw new Error("Conversion failed");
+        throw new Error("CloudConvert conversion failed");
       }
 
       await new Promise(r => setTimeout(r, 2000));
     }
 
-    // 4️⃣ Download URL al
+    // 4️⃣ Download URL
     const exportTask = Object.values(job.tasks)
       .find(t => t.operation === "export/url");
 
@@ -109,10 +129,13 @@ app.post("/convert", upload.single("file"), async (req, res) => {
 
     res.json({
       status: "ok",
+      ocr_used: isPdfToDocx,
       download_url: exportTask.result.files[0].url
     });
 
   } catch (err) {
+    console.error("Conversion error:", err.message);
+
     res.status(500).json({
       status: "error",
       message: err.message
@@ -121,5 +144,5 @@ app.post("/convert", upload.single("file"), async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("ToMeta CloudConvert server running on port", PORT);
+  console.log("✅ ToMeta CloudConvert server running on port", PORT);
 });
