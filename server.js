@@ -4,34 +4,54 @@ import axios from "axios";
 import FormData from "form-data";
 
 const app = express();
-const upload = multer();
+// Bellek dolmasın: dosya boyutu sınırı (Render ücretsiz katmanı 512 MB RAM)
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 const PORT = process.env.PORT || 3000;
 
 const CLOUD_KEY = process.env.CLOUDCONVERT_API_KEY;
+// Ayarlanırsa istemcideki ApiService.Security.APP_SECRET ile eşleşmeyen istekler reddedilir.
+// Ayarlanmazsa eski davranış (kontrolsüz) korunur → kademeli geçiş mümkün.
+const APP_SECRET = process.env.APP_SECRET;
+const DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '24', 10);
+
+function requireSecret(req, res, next) {
+  if (!APP_SECRET) return next();
+  if (req.headers['x-app-secret'] !== APP_SECRET) {
+    return res.status(401).json({ status: 'error', message: 'Yetkisiz erişim.' });
+  }
+  next();
+}
 
 if (!CLOUD_KEY) {
   console.error("❌ CLOUDCONVERT_API_KEY missing!");
   process.exit(1);
 }
 
-// Free plan limiti (günde 25 dönüşüm)
+// Ücretsiz CloudConvert kotası TÜM kullanıcılar için ortaktır. Sayaç UTC gün değişiminde
+// sıfırlanır (sunucu yeniden başlasa da 24 saatlik zamanlayıcı gibi kaymaz).
 let dailyCount = 0;
-setInterval(() => {
-  dailyCount = 0;
-  console.log("✅ Daily counter reset");
-}, 24 * 60 * 60 * 1000);
+let counterDay = new Date().toISOString().slice(0, 10);
+function rollCounter() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== counterDay) {
+    counterDay = today;
+    dailyCount = 0;
+    console.log('✅ Daily counter reset');
+  }
+}
 
 // Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "tometa-cloudconvert", dailyCount });
 });
 
-app.post("/convert", upload.single("file"), async (req, res) => {
+app.post("/convert", requireSecret, upload.single("file"), async (req, res) => {
   try {
-    if (dailyCount >= 24) {
+    rollCounter();
+    if (dailyCount >= DAILY_LIMIT) {
       return res.status(429).json({
         status: "limit_reached",
-        message: "Daily CloudConvert free limit reached"
+        message: "Günlük CloudConvert ücretsiz kotası doldu"
       });
     }
 
@@ -97,10 +117,10 @@ app.post("/convert", upload.single("file"), async (req, res) => {
     // 3️⃣ Job tamamlanmasını bekle (max 3 dakika)
     let job;
     let attempts = 0;
-    const maxAttempts = 36; // 36 × 5sn = 3 dakika
+    const maxAttempts = 90; // 90 × 2sn = 3 dakika
 
     while (attempts < maxAttempts) {
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 2000));
       attempts++;
 
       const statusRes = await axios.get(
@@ -165,6 +185,15 @@ app.post("/convert", upload.single("file"), async (req, res) => {
       });
     }
   }
+});
+
+// multer / genel hata yakalayıcı
+app.use((err, req, res, _next) => {
+  if (err && err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ status: "error", message: "Dosya çok büyük (en fazla 25 MB)" });
+  }
+  console.error("Sunucu hatası:", err);
+  res.status(500).json({ status: "error", message: "Sunucu hatası" });
 });
 
 app.listen(PORT, () => {

@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tometa-backend
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: CLOUDCONVERT_API_KEY
+        sync: false          # https://cloudconvert.com/dashboard/api/v2/keys (task.read, task.write)
+      - key: APP_SECRET
+        sync: false
+      - key: DAILY_LIMIT
+        value: "24"          # ücretsiz planı aşmamak için günlük üst sınır
